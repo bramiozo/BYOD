@@ -24,6 +24,7 @@ dependencies = [
   "python-dotenv>=1.0",
   "tqdm>=4.66",
   "matplotlib>=3.7",
+  "pytest (>=9.2.0,<10.0.0)",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +36,16 @@ evaluation = ["math-verify[antlr4_13_2]>=0.8", "openai>=1.68"]
 
 [project.urls]
 Repository = "https://github.com/RuurdKuiper/BYOD"
+
+# Poetry installs the CUDA 12.4 build; pip installs use the generic requirement above.
+[[tool.poetry.source]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+priority = "explicit"
+
+
+[tool.poetry.dependencies]
+torch = {version = "==2.6.0+cu124", source = "pytorch-cu124"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
