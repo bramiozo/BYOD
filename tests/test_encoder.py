@@ -68,45 +68,55 @@ def test_encoder_corruption_only_masks_answer_and_sep_not_prompt_or_padding():
     assert (logits.grad[batch["labels"] == -100] == 0).all()
 
 
-def test_neighbor_weight_increases_loss_and_gradient_only_for_wrong_visible_answer_copy():
+def test_ngram_weight_penalizes_only_wrong_repeats_from_visible_answer_context():
+    # The predicted 6 would repeat the visible answer trigram (4, 5, 6).
     batch = {
-        "input_ids": torch.tensor([[4, 5, 3, 7, 2]]),
-        "answer_mask": torch.tensor([[False, True, True, True, False]]),
-        "labels": torch.tensor([[-100, -100, 6, -100, -100]]),
-        "sampled_t": torch.ones(1), "answer_lengths": torch.tensor([4]),
+        "input_ids": torch.tensor([[9, 4, 5, 6, 4, 5, 3, 7, 2]]),
+        "answer_mask": torch.tensor([[False, True, True, True, True, True, True, True, False]]),
+        "labels": torch.tensor([[-100, -100, -100, -100, -100, -100, 8, -100, -100]]),
+        "sampled_t": torch.ones(1), "answer_lengths": torch.tensor([8]),
     }
-    logits = torch.zeros(1, 5, 8, requires_grad=True)
+    logits = torch.zeros(1, 9, 10, requires_grad=True)
     with torch.no_grad():
-        logits[0, 2, 5] = 4  # Wrong prediction copies the visible left answer token.
-        logits[0, 2, 6] = 3  # Correct target.
+        logits[0, 6, 6] = 4
+        logits[0, 6, 8] = 3
+    def weighted(size=3):
+        return encoder_loss(logits, batch, ngram_repetition_weight=4,
+                            ngram_size=size, mask_token_id=3)
+
     base = encoder_loss(logits, batch)
-    boosted = encoder_loss(logits, batch, neighbor_repetition_weight=4, mask_token_id=3)
+    boosted = weighted()
     assert boosted > base
     base_gradient = torch.autograd.grad(base, logits, retain_graph=True)[0]
     boosted_gradient = torch.autograd.grad(boosted, logits)[0]
-    assert boosted_gradient[0, 2, 5] > base_gradient[0, 2, 5]
+    assert boosted_gradient[0, 6, 6] > base_gradient[0, 6, 6]
 
-    # The true answer may legitimately repeat the preceding answer token.
-    batch["labels"][0, 2] = 5
-    assert torch.allclose(encoder_loss(logits, batch),
-                          encoder_loss(logits, batch, neighbor_repetition_weight=4, mask_token_id=3))
-    batch["labels"][0, 2] = 6
-    # Do not punish copying a prompt token or a masked answer neighbor.
-    batch["answer_mask"][0, 1] = False
-    assert torch.allclose(encoder_loss(logits, batch),
-                          encoder_loss(logits, batch, neighbor_repetition_weight=4, mask_token_id=3))
-    batch["answer_mask"][0, 1] = True
-    batch["input_ids"][0, 1] = 3
-    assert torch.allclose(encoder_loss(logits, batch),
-                          encoder_loss(logits, batch, neighbor_repetition_weight=4, mask_token_id=3))
+    # Repeating the true target is legitimate, even if it repeats a trigram.
+    batch["labels"][0, 6] = 6
+    assert torch.allclose(weighted(), encoder_loss(logits, batch))
+    batch["labels"][0, 6] = 8
+    # Prompt tokens, masked references, and masked context cannot be evidence.
+    batch["answer_mask"][0, 1:4] = False
+    assert torch.allclose(weighted(), base)
+    batch["answer_mask"][0, 1:4] = True
+    batch["input_ids"][0, 2] = 3
+    assert torch.allclose(weighted(), base)
+    batch["input_ids"][0, 2] = 5
+    batch["input_ids"][0, 5] = 3
+    assert torch.allclose(weighted(), base)
+    batch["input_ids"][0, 5] = 5
 
-    # The right answer neighbor also counts, but only if visible.
-    batch["input_ids"][0, 3] = 5
-    assert encoder_loss(logits, batch, neighbor_repetition_weight=4, mask_token_id=3) > encoder_loss(logits, batch)
+    # A repeated bigram need not be a repeated trigram.
+    batch["input_ids"][0, 4] = 7
+    assert torch.allclose(weighted(), base)
+    assert weighted(size=2) > base
+    assert torch.allclose(weighted(size=20), base)
     with pytest.raises(ValueError, match="at least 1"):
-        encoder_loss(logits, batch, neighbor_repetition_weight=0)
+        encoder_loss(logits, batch, ngram_repetition_weight=0)
+    with pytest.raises(ValueError, match="at least 2"):
+        encoder_loss(logits, batch, ngram_size=1)
     with pytest.raises(ValueError, match="requires mask_token_id"):
-        encoder_loss(logits, batch, neighbor_repetition_weight=2)
+        encoder_loss(logits, batch, ngram_repetition_weight=2)
 
 
 def test_encoder_sampler_keeps_prompt_and_uses_sep_to_stop():
@@ -187,7 +197,7 @@ def test_tiny_local_mlm_train_save_reload_and_sample(tmp_path):
         "--output-column", "answer", "--max-samples", "6",
         "--output-dir", str(output), "--max-length", "48",
         "--batch-size", "2", "--max-updates", "1",
-        "--neighbor-repetition-weight", "2",
+        "--ngram-repetition-weight", "2", "--ngram-size", "2",
         "--validation-fraction", "0.25", "--device", "cpu",
     ], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=90, check=True)
     assert "step 1/1" in train.stdout

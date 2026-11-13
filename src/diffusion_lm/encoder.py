@@ -78,39 +78,55 @@ class EncoderCollator:
                 "answer_lengths": torch.tensor([len(c) - s for c, s, _ in rows])}
 
 
-def encoder_loss(logits, batch, *, neighbor_repetition_weight: float = 1.0,
-                 mask_token_id: int | None = None):
-    """Inverse-t masked CE with optional conditional wrong-neighbor class weight.
+def _wrong_repeated_ngrams(batch, example_ids, token_ids, predictions, labels,
+                           mask_token_id: int, ngram_size: int):
+    """Find wrong predictions completing an earlier, fully visible answer n-gram."""
+    inputs = batch["input_ids"]
+    if ngram_size > inputs.shape[1]:
+        return torch.zeros_like(predictions, dtype=torch.bool)
+    visible = batch["answer_mask"] & (inputs != mask_token_id)
+    offsets = torch.arange(ngram_size - 1, device=inputs.device)
+    context_positions = (token_ids[:, None] - (ngram_size - 1) + offsets).clamp_min(0)
+    context = inputs[example_ids[:, None], context_positions]
+    context_visible = visible[example_ids[:, None], context_positions].all(dim=1)
+    previous = inputs.unfold(1, ngram_size, 1)[example_ids]
+    previous_visible = visible.unfold(1, ngram_size, 1).all(dim=-1)[example_ids]
+    previous_starts = torch.arange(previous.shape[1], device=inputs.device)
+    earlier = previous_starts[None, :] + ngram_size <= token_ids[:, None]
+    repeated = (
+        previous_visible & earlier
+        & (previous[:, :, :-1] == context[:, None, :]).all(dim=-1)
+        & (previous[:, :, -1] == predictions[:, None])
+    ).any(dim=1)
+    return (predictions != labels) & context_visible & repeated
 
-    If the current top prediction incorrectly copies a *visible answer* neighbor,
-    raise only that class's logit by log(weight) inside CE. This increases its
-    loss/gradient without penalizing legitimate repetitions or prompt tokens.
+
+def encoder_loss(logits, batch, *, ngram_repetition_weight: float = 1.0,
+                 ngram_size: int = 3, mask_token_id: int | None = None):
+    """Inverse-t masked CE with optional conditional wrong n-gram class weight.
+
+    Boost the predicted class inside CE only when an incorrect prediction
+    completes an n-gram already visible earlier in the same answer. Masked
+    context and legitimate repeats never trigger the extra loss.
     """
-    if not math.isfinite(neighbor_repetition_weight) or neighbor_repetition_weight < 1:
-        raise ValueError("neighbor_repetition_weight must be finite and at least 1")
+    if not math.isfinite(ngram_repetition_weight) or ngram_repetition_weight < 1:
+        raise ValueError("ngram_repetition_weight must be finite and at least 1")
+    if ngram_size < 2:
+        raise ValueError("ngram_size must be at least 2")
     selected = batch["labels"] != -100
     example_ids, token_ids = selected.nonzero(as_tuple=True)
     selected_logits = logits[example_ids, token_ids].float()
     selected_labels = batch["labels"][selected]
-    if neighbor_repetition_weight > 1:
+    if ngram_repetition_weight > 1:
         if mask_token_id is None or "answer_mask" not in batch:
-            raise ValueError("Neighbor repetition weighting requires mask_token_id and answer_mask")
-        inputs, answer_mask = batch["input_ids"], batch["answer_mask"]
-        left = (token_ids - 1).clamp_min(0)
-        right = (token_ids + 1).clamp_max(inputs.shape[1] - 1)
+            raise ValueError("N-gram repetition weighting requires mask_token_id and answer_mask")
         predicted = selected_logits.detach().argmax(dim=-1)
-        copy = (predicted != selected_labels) & (
-            ((token_ids > 0) & answer_mask[example_ids, left]
-             & (inputs[example_ids, left] != mask_token_id)
-             & (predicted == inputs[example_ids, left]))
-            | ((token_ids + 1 < inputs.shape[1]) & answer_mask[example_ids, right]
-               & (inputs[example_ids, right] != mask_token_id)
-               & (predicted == inputs[example_ids, right]))
-        )
+        copy = _wrong_repeated_ngrams(batch, example_ids, token_ids, predicted, selected_labels,
+                                       mask_token_id, ngram_size)
         if copy.any():
             selected_logits = selected_logits.clone()
             rows = copy.nonzero(as_tuple=True)[0]
-            selected_logits[rows, predicted[rows]] += math.log(neighbor_repetition_weight)
+            selected_logits[rows, predicted[rows]] += math.log(ngram_repetition_weight)
     ce = F.cross_entropy(selected_logits, selected_labels, reduction="none")
     totals = torch.zeros(logits.shape[0], device=logits.device, dtype=ce.dtype).scatter_add(0, example_ids, ce)
     return (totals / batch["sampled_t"].to(logits.device) / batch["answer_lengths"].to(logits.device)).mean()
@@ -127,7 +143,7 @@ def train_encoder(
     max_length: int = 256, batch_size: int = 8, max_updates: int = 1000,
     learning_rate: float = 5e-5, validation_fraction: float = 0.05,
     seed: int = 42, device: str | None = None, max_samples: int | None = None,
-    neighbor_repetition_weight: float = 1.0,
+    ngram_repetition_weight: float = 1.0, ngram_size: int = 3,
 ):
     """Fine-tune a full masked-LM and save the best validation checkpoint.
 
@@ -141,8 +157,10 @@ def train_encoder(
         raise ValueError("max_updates, batch_size and learning_rate must be positive; validation_fraction must be in (0, 1)")
     if max_samples is not None and max_samples < 2:
         raise ValueError("max_samples must be at least 2")
-    if not math.isfinite(neighbor_repetition_weight) or neighbor_repetition_weight < 1:
-        raise ValueError("neighbor_repetition_weight must be finite and at least 1")
+    if not math.isfinite(ngram_repetition_weight) or ngram_repetition_weight < 1:
+        raise ValueError("ngram_repetition_weight must be finite and at least 1")
+    if ngram_size < 2:
+        raise ValueError("ngram_size must be at least 2")
     output = Path(output_dir)
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Encoder output directory is not empty: {output}")
@@ -201,8 +219,8 @@ def train_encoder(
         model.train()
         optimizer.zero_grad()
         logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
-        loss = encoder_loss(logits, batch, neighbor_repetition_weight=neighbor_repetition_weight,
-                            mask_token_id=tokenizer.mask_token_id)
+        loss = encoder_loss(logits, batch, ngram_repetition_weight=ngram_repetition_weight,
+                            ngram_size=ngram_size, mask_token_id=tokenizer.mask_token_id)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite encoder training loss at step {step}")
         loss.backward()
@@ -214,8 +232,8 @@ def train_encoder(
                 for val in val_loader:
                     val = {key: value.to(device) for key, value in val.items()}
                     logits = model(input_ids=val["input_ids"], attention_mask=val["attention_mask"]).logits
-                    total += encoder_loss(logits, val, neighbor_repetition_weight=neighbor_repetition_weight,
-                                          mask_token_id=tokenizer.mask_token_id).item() * len(val["input_ids"])
+                    total += encoder_loss(logits, val, ngram_repetition_weight=ngram_repetition_weight,
+                                          ngram_size=ngram_size, mask_token_id=tokenizer.mask_token_id).item() * len(val["input_ids"])
             metric = total / len(val_rows)
             if not math.isfinite(metric):
                 raise FloatingPointError(f"Non-finite encoder validation loss at step {step}")

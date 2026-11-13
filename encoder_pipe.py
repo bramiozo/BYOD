@@ -20,8 +20,9 @@ def main():
     train.add_argument("--max-updates", type=int, default=1000)
     train.add_argument("--max-samples", type=int, help="Stream at most this many usable rows (avoids downloading the whole dataset)")
     train.add_argument("--learning-rate", type=float, default=5e-5)
-    train.add_argument("--neighbor-repetition-weight", type=float, default=1.0,
-                       help="Boost loss for an incorrect copy of a visible adjacent answer token; 1 disables it")
+    train.add_argument("--ngram-repetition-weight", type=float, default=1.0,
+                       help="Boost loss when an incorrect prediction repeats a visible answer n-gram; 1 disables it")
+    train.add_argument("--ngram-size", type=int, default=3, help="Size of repeated answer n-grams (at least 2)")
     train.add_argument("--validation-fraction", type=float, default=0.05)
     train.add_argument("--seed", type=int, default=42)
     train.add_argument("--device", help="Defaults to CUDA if available, otherwise CPU")
@@ -50,7 +51,8 @@ def main():
                       max_updates=args.max_updates, learning_rate=args.learning_rate,
                       validation_fraction=args.validation_fraction, seed=args.seed, device=args.device,
                       max_samples=args.max_samples,
-                      neighbor_repetition_weight=args.neighbor_repetition_weight)
+                      ngram_repetition_weight=args.ngram_repetition_weight,
+                      ngram_size=args.ngram_size)
     else:
         model, tokenizer = load_encoder(args.model, args.device)
         print(generate_encoder(model, tokenizer, args.prompt, gen_length=args.gen_length,

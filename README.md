@@ -109,12 +109,16 @@ For a text-only corpus with a `text` column, use `--input-column ''
 --output-column text`; sampling then uses an empty prompt. Training randomly masks
 answer tokens plus the terminating `[SEP]` at variable noise levels; loss is
 computed only at masked answer positions. For optional training-time correction,
-pass `--neighbor-repetition-weight 2`: when the model's top prediction is
-**incorrect** and matches a visible adjacent *answer* token, its class gets a
-higher weight inside the masked cross-entropy. Correct repetitions, masked
-neighbors, prompt tokens, and padding do not trigger it; `1` keeps the original
-loss. Validation uses the same weighted objective. This is separate from the
-inference-time `--repetition-penalty`.
+pass `--ngram-repetition-weight 2 --ngram-size 3`: when the model's top
+prediction is **incorrect** and would complete a trigram already visible
+earlier in the same answer, its class gets a higher weight inside the masked
+cross-entropy. Only fully visible answer n-grams count; masked tokens, prompt,
+and padding cannot supply evidence. Correct repetitions are never penalized.
+Try `--ngram-size 2` for a stronger bigram signal; `--ngram-repetition-weight 1`
+keeps the original loss. Validation uses the same weighted objective. This
+replaces the former `--neighbor-repetition-weight` option and is separate from
+the inference-time (single-token) `--repetition-penalty`. With high mask ratios,
+complete visible n-grams are rare, so this correction may affect few positions.
 
 Sampling starts from a fixed number
 of `[MASK]` slots, repeatedly reveals high-confidence predictions, and stops
