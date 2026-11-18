@@ -102,7 +102,7 @@ with `instruction` and `output` strings (or a Hub dataset with these columns):
 
 ```bash
 python encoder_pipe.py train --model bert-base-uncased --dataset examples.jsonl --output-dir outputs/bert-diffusion --max-updates 1000
-python encoder_pipe.py sample --model outputs/bert-diffusion --prompt "Explain diffusion" --gen-length 64 --steps 64
+python encoder_pipe.py sample --model outputs/bert-diffusion --prompt "Explain diffusion" --gen-length 64 --steps 64 --gif-output outputs/fill.gif
 ```
 
 For a text-only corpus with a `text` column, use `--input-column ''
@@ -122,7 +122,9 @@ complete visible n-grams are rare, so this correction may affect few positions.
 
 Sampling starts from a fixed number
 of `[MASK]` slots, repeatedly reveals high-confidence predictions, and stops
-at the first predicted `[SEP]`. `--gen-length` is a maximum *token* budget,
+at the first predicted `[SEP]`. The optional `--gif-output path.gif` saves a
+looping animation of the process, with the prompt above the progressively
+filled answer. `--gen-length` is a maximum *token* budget,
 not an exact length. Sampling defaults to no logit penalties; use
 `--repetition-penalty 1.2` to discourage already revealed answer tokens,
 `--eos-penalty 2` to delay the first SEP (`</s>` for RoBERTa), or
