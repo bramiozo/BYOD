@@ -35,6 +35,7 @@ def main():
     sample.add_argument("--repetition-penalty", type=float, default=1.0, help="Penalize previously revealed answer tokens; 1 disables it")
     sample.add_argument("--eos-penalty", type=float, default=1.0, help="Penalize the tokenizer's SEP stop token; 1 disables it")
     sample.add_argument("--suppress-eos", action="store_true", help="Disallow SEP; generate up to the full token budget")
+    sample.add_argument("--gif-output", help="Optionally save a GIF of answer slots filling over time")
     sample.add_argument("--device")
     args = parser.parse_args()
     os.environ["USE_TF"] = "0"
@@ -58,7 +59,8 @@ def main():
         print(generate_encoder(model, tokenizer, args.prompt, gen_length=args.gen_length,
                                steps=args.steps, temperature=args.temperature,
                                repetition_penalty=args.repetition_penalty,
-                               eos_penalty=args.eos_penalty, suppress_eos=args.suppress_eos))
+                               eos_penalty=args.eos_penalty, suppress_eos=args.suppress_eos,
+                               gif_output=args.gif_output))
 
 
 if __name__ == "__main__":

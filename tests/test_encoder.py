@@ -133,6 +133,25 @@ def test_encoder_sampler_keeps_prompt_and_uses_sep_to_stop():
                for ids, _ in model.calls)
 
 
+def test_encoder_sampler_saves_fill_animation(tmp_path):
+    from PIL import Image
+
+    tokenizer = TinyTokenizer()
+    model = FixedModel()
+    model.prefix_length = len(tokenizer.encode("Instruction: hello\nResponse:"))
+    output = tmp_path / "fill.gif"
+
+    generate_encoder(model, tokenizer, "hello", gen_length=3, steps=3, gif_output=output)
+
+    assert output.is_file()
+    with Image.open(output) as animation:
+        assert animation.format == "GIF"
+        assert animation.n_frames == 4  # Initial masks plus one frame per fill step.
+    with pytest.raises(ValueError, match=".gif extension"):
+        generate_encoder(model, tokenizer, "hello", gen_length=1, steps=1,
+                         gif_output=tmp_path / "fill.png")
+
+
 def test_encoder_sampler_can_penalize_or_suppress_stop_token():
     tokenizer = TinyTokenizer()
     model = FixedModel()
@@ -208,9 +227,10 @@ def test_tiny_local_mlm_train_save_reload_and_sample(tmp_path):
     sample = subprocess.run([
         sys.executable, str(script), "sample", "--model", str(output),
         "--prompt", "question 0", "--gen-length", "4", "--steps", "2",
-        "--device", "cpu",
+        "--gif-output", str(tmp_path / "fill.gif"), "--device", "cpu",
     ], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=90, check=True)
     assert sample.stdout.strip() == answer
+    assert (tmp_path / "fill.gif").is_file()
 
 
 def test_encoder_checks_context_length_and_mask_tokens():

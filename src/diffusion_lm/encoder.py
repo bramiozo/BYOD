@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import textwrap
 
 import torch
 import torch.nn.functional as F
@@ -249,7 +250,8 @@ def train_encoder(
 def generate_encoder(model, tokenizer, instruction: str, *, gen_length: int = 64,
                      steps: int = 64, temperature: float = 0.0, device: str | torch.device | None = None,
                      repetition_penalty: float = 1.0, eos_penalty: float = 1.0,
-                     suppress_eos: bool = False) -> str:
+                     suppress_eos: bool = False,
+                     gif_output: str | Path | None = None) -> str:
     """Progressively reveal the most confident masked answer positions.
 
     Fixed-length slots are all visible to the encoder; the first predicted SEP
@@ -258,6 +260,9 @@ def generate_encoder(model, tokenizer, instruction: str, *, gen_length: int = 64
     Unresolved positions are recomputed at every step.
     """
     mask_id, sep_id = _special_ids(tokenizer)
+    gif_path = Path(gif_output) if gif_output is not None else None
+    if gif_path is not None and gif_path.suffix.lower() != ".gif":
+        raise ValueError("gif_output must have a .gif extension")
     if gen_length < 1 or steps < 1 or not math.isfinite(temperature) or temperature < 0:
         raise ValueError("gen_length and steps must be positive; temperature must be finite and non-negative")
     if any(not math.isfinite(value) or value < 1 for value in (repetition_penalty, eos_penalty)):
@@ -270,6 +275,7 @@ def generate_encoder(model, tokenizer, instruction: str, *, gen_length: int = 64
         device = next(model.parameters()).device
     device = torch.device(device)
     x = torch.tensor([prefix + [mask_id] * gen_length], device=device)
+    fill_states = [x[0, len(prefix):].tolist()] if gif_path is not None else None
     model.eval()
     blocked = set(tokenizer.all_special_ids) - {sep_id}
     blocked.add(mask_id)
@@ -298,10 +304,82 @@ def generate_encoder(model, tokenizer, instruction: str, *, gen_length: int = 64
         count = math.ceil(len(remaining) / (steps - step))
         chosen = torch.topk(confidence, count).indices
         x[0, len(prefix) + remaining[chosen]] = predictions[chosen]
+        if fill_states is not None:
+            fill_states.append(x[0, len(prefix):].tolist())
     answer = x[0, len(prefix):].tolist()
+    if gif_path is not None:
+        _save_fill_gif(tokenizer, fill_states, gif_path, mask_id, sep_id, prefix)
     if sep_id in answer:
         answer = answer[:answer.index(sep_id)]
     return tokenizer.decode([token for token in answer if token != mask_id], skip_special_tokens=True).strip()
+
+
+def _save_fill_gif(tokenizer, states, output: Path, mask_id: int, sep_id: int,
+                   prefix: list[int]) -> None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise ImportError("Saving a fill animation requires Pillow") from exc
+
+    def display_tokens(token_ids):
+        parts = []
+        visible = []
+
+        def flush_visible():
+            if visible:
+                parts.append(tokenizer.decode(visible, skip_special_tokens=True).strip())
+                visible.clear()
+
+        for token_id in token_ids:
+            if token_id == mask_id:
+                flush_visible()
+                parts.append("[MASK]")
+            elif token_id == sep_id:
+                flush_visible()
+                parts.append("[SEP]")
+            else:
+                visible.append(token_id)
+        flush_visible()
+        text = " ".join(part for part in parts if part)
+        return text.encode("ascii", "backslashreplace").decode("ascii")
+
+    prompt = tokenizer.decode(prefix, skip_special_tokens=True).strip()
+    prompt = prompt.encode("ascii", "backslashreplace").decode("ascii")
+    prompt_lines = textwrap.wrap(prompt, width=88) or [""]
+    rendered = [display_tokens(state) for state in states]
+    wrapped = [textwrap.wrap(text, width=88) or [""] for text in rendered]
+    answer_line_count = max(map(len, wrapped))
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 18)
+    except OSError:
+        font = ImageFont.load_default()
+
+    width = 1000
+    answer_label_y = 102 + len(prompt_lines) * 26 + 18
+    answer_y = answer_label_y + 26
+    height = answer_y + answer_line_count * 26 + 16
+    frames = []
+    total = len(states) - 1
+    for index, (state, lines) in enumerate(zip(states, wrapped)):
+        image = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(image)
+        revealed = sum(token_id != mask_id for token_id in state)
+        draw.text((24, 20), f"Fill step {index}/{total}  |  {revealed}/{len(state)} slots revealed",
+                  fill="#253247", font=font)
+        draw.line((24, 58, width - 24, 58), fill="#d8dee9", width=2)
+        draw.text((24, 76), "Prompt", fill="#53627a", font=font)
+        for line_index, line in enumerate(prompt_lines):
+            draw.text((24, 102 + line_index * 26), line, fill="#17202e", font=font)
+        draw.text((24, answer_label_y), "Generated answer", fill="#53627a", font=font)
+        for line_index, line in enumerate(lines):
+            draw.text((24, answer_y + line_index * 26), line, fill="#17202e", font=font)
+        frames.append(image)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    durations = [140] * len(frames)
+    durations[-1] = 1000
+    frames[0].save(output, save_all=True, append_images=frames[1:],
+                    duration=durations, loop=0, disposal=2)
 
 
 def load_encoder(path: str | Path, device: str | None = None):
