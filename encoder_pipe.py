@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import sys
 
+from dotenv import load_dotenv
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -38,6 +40,7 @@ def main():
     sample.add_argument("--gif-output", help="Optionally save a GIF of answer slots filling over time")
     sample.add_argument("--device")
     args = parser.parse_args()
+    load_dotenv(Path(__file__).resolve().parent / ".env")
     os.environ["USE_TF"] = "0"
     os.environ["USE_TORCH"] = "1"
     # Poetry --no-root installs dependencies but not this src-layout package.

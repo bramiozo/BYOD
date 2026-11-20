@@ -7,6 +7,7 @@ its native SEP token; SEP is the learned stop marker at generation time.
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 import textwrap
 
@@ -154,6 +155,7 @@ def train_encoder(
     """
     from datasets import load_dataset
 
+    token = os.getenv("HF_TOKEN")
     if max_updates < 1 or batch_size < 1 or learning_rate <= 0 or not 0 < validation_fraction < 1:
         raise ValueError("max_updates, batch_size and learning_rate must be positive; validation_fraction must be in (0, 1)")
     if max_samples is not None and max_samples < 2:
@@ -172,12 +174,12 @@ def train_encoder(
     if max_samples is not None:
         # Shuffling an iterable uses a bounded buffer, not a uniform sample of
         # the entire Hub dataset. It avoids fetching all 4.49M MIRIAD rows.
-        stream = load_dataset(source_name, split="train", streaming=True, **source_kwargs)
+        stream = load_dataset(source_name, split="train", streaming=True, token=token, **source_kwargs)
         stream = stream.filter(lambda row: isinstance(row.get(output_column), str) and bool(row[output_column].strip()))
         dataset = list(stream.shuffle(seed=seed, buffer_size=min(max_samples, 10_000)).take(max_samples))
         columns = dataset[0].keys() if dataset else ()
     else:
-        dataset = load_dataset(source_name, split="train", **source_kwargs)
+        dataset = load_dataset(source_name, split="train", token=token, **source_kwargs)
         columns = dataset.column_names
     needed = [output_column] + ([input_column] if input_column else [])
     if any(column not in columns for column in needed):
@@ -192,8 +194,8 @@ def train_encoder(
     else:
         split = dataset.train_test_split(test_size=max(1, round(len(dataset) * validation_fraction)), seed=seed)
         train_data, val_data = split["train"], split["test"]
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForMaskedLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=token)
+    model = AutoModelForMaskedLM.from_pretrained(model_name, token=token)
     _special_ids(tokenizer)
     limit = getattr(model.config, "max_position_embeddings", None)
     if limit is not None and max_length > limit:
@@ -384,8 +386,9 @@ def _save_fill_gif(tokenizer, states, output: Path, mask_id: int, sep_id: int,
 
 def load_encoder(path: str | Path, device: str | None = None):
     """Load a saved full encoder checkpoint for generation."""
-    tokenizer = AutoTokenizer.from_pretrained(path)
-    model = AutoModelForMaskedLM.from_pretrained(path)
+    token = os.getenv("HF_TOKEN")
+    tokenizer = AutoTokenizer.from_pretrained(path, token=token)
+    model = AutoModelForMaskedLM.from_pretrained(path, token=token)
     model.to(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model.eval()
     return model, tokenizer
